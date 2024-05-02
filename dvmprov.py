@@ -3,6 +3,7 @@ from waitress import serve
 import argparse
 import logging
 import requests
+import subprocess
 import hashlib
 import json
 
@@ -40,37 +41,39 @@ def rest_auth():
     global rest_host
     # Hash our password
     hashPass = hashlib.sha256(rest_api_password.encode()).hexdigest()
-    # Make a request to get our auth token
-    result = requests.put(
-        url = "http://%s:%u/auth" % (rest_api_address, rest_api_port),
-        headers = {'Content-type': 'application/json'},
-        json = {'auth': hashPass}
-    )
+    # Prepare curl command
+    curl_cmd = [
+        'curl',
+        '-s',  # Silent mode
+        '-X', 'PUT',
+        '-H', 'Content-Type: application/json',
+        '--data', json.dumps({'auth': hashPass}),
+        f"http://{rest_api_address}:{rest_api_port}/auth"
+    ]
+
+    # Execute curl command
+    result = subprocess.run(curl_cmd, capture_output=True, text=True)
+    response_content = result.stdout
+
     # Debug
-    logging.debug("--- REQ ---")
-    logging.debug(result.request.url)
-    logging.debug(result.request.headers)
-    logging.debug(result.request.body)
     logging.debug("--- RESP ---")
-    logging.debug(result.url)
-    logging.debug(result.headers)
-    logging.debug(result.content)
-    # Try to convert the response to JSON
+    logging.debug(response_content)
+
+    # Handle response
     try:
-        response = json.loads(result.content)
-        if "status" in response:
-            if response["status"] != 200:
-                logging.error("Got error from FNE REST API during auth exchange: %s" % response["message"])
-                exit(1)
-            if "token" in response:
-                auth_token = response["token"]
-                rest_host = "%s:%u" % (rest_api_address, rest_api_port)
-                logging.info("Successfully authenticated with FNE REST API")
+        response = json.loads(response_content)
+        if "status" in response and response["status"] == 200:
+            auth_token = response.get("token")
+            rest_host = f"{rest_api_address}:{rest_api_port}"
+            logging.info("Successfully authenticated with FNE REST API")
         else:
-            logging.error("Invalid response received from FNE REST API during auth exchange: %s" % result.content)
+            logging.error(f"Failed to authenticate with FNE REST API: {response.get('message')}")
             exit(1)
+    except json.JSONDecodeError as ex:
+        logging.error("Failed to decode JSON response from FNE REST API")
+        exit(1)
     except Exception as ex:
-        logging.error("Caught exception during FNE REST API authentication: %s" % ex)
+        logging.error(f"Caught exception during FNE REST API authentication: {ex}")
         exit(1)
 
 """
@@ -89,7 +92,7 @@ def test_auth():
         else:
             logging.error("Failed to authenticate with FNE")
             return False
-    
+
     # Make the request/post/whatever
     headers = {}
     headers['X-DVM-Auth-Token'] = auth_token
@@ -100,7 +103,7 @@ def test_auth():
         headers         = headers,
         allow_redirects = False
     )
-    
+
     # Check we were successful
     resultObj = json.loads(result.content)
     if "status" not in resultObj:
@@ -149,7 +152,7 @@ https://stackoverflow.com/a/36601467/1842613
 @app.route('/rest/<path:path>', methods=['GET', 'POST', 'PUT'])
 def rest(path):
     logging.debug("Got REST %s for %s" % (request.method, path))
-    
+
     # Make sure we're authenticated
     if not auth_token and not rest_host:
         logging.error("REST API connection to FNE not initialized!")
@@ -157,7 +160,7 @@ def rest(path):
         if not test_auth():
             logging.error("Failed to authenticate with FNE")
             exit(1)
-    
+
     # Make sure we have valid auth
     if not test_auth():
         logging.warning("Authentication token expired, reauthenticating...")
@@ -165,7 +168,7 @@ def rest(path):
         if not test_auth():
             logging.error("Failed to re-authenticated with FNE")
             exit(1)
-    
+
     # Make the request/post/whatever
     headers = {k:v for k,v in request.headers if k.lower() != 'host'}
     headers['X-DVM-Auth-Token'] = auth_token
@@ -177,14 +180,14 @@ def rest(path):
         data            = request.get_data(),
         allow_redirects = False
     )
-    
+
     # Exclude headers in response
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']  #NOTE we here exclude all "hop-by-hop headers" defined by RFC 2616 section 13.5.1 ref. https://www.rfc-editor.org/rfc/rfc2616#section-13.5.1
     headers          = [
         (k,v) for k,v in result.raw.headers.items()
         if k.lower() not in excluded_headers
     ]
-    
+
     # Finalize the response
     response = Response(result.content, result.status_code, headers)
     return response
